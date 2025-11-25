@@ -1,10 +1,11 @@
 # app.py
 """
-ViralScope — No video_id anywhere + Duration histogram per channel card
-- Inline API_KEY present (keep private).
-- Run: streamlit run app.py
+ViralScope — Updated:
+- Removed per-card duration histogram
+- Added Max channel age filter (months)
+- Thin white border around each channel card (CSS)
+- Inline API key still present (keep private)
 """
-
 import streamlit as st
 import requests
 from datetime import datetime, timedelta
@@ -118,7 +119,7 @@ def monetization_likelihood(subs, avg_views_per_video, channel_age_months):
     return int(max(0, min(100, s)))
 
 # -------------------------
-# DB helpers (note: no video_id column anywhere)
+# DB helpers (no video_id column)
 # -------------------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -201,13 +202,20 @@ def load_samples_for_channel(channel_id):
     return df
 
 # -------------------------
-# Styling
+# Styling (thin white border around each card)
 # -------------------------
 st.set_page_config(page_title="ViralScope", layout="wide")
 st.markdown("""
 <style>
 body { background:#061029; color:#e7eef8; }
-.card { padding:12px; border-radius:10px; margin-bottom:12px; background:#071228; border:1px solid rgba(255,255,255,0.03); }
+.card {
+  padding:12px;
+  border-radius:10px;
+  margin-bottom:12px;
+  background:#071228;
+  border: 1px solid rgba(255,255,255,0.12); /* thin white border */
+  box-shadow: 0 4px 10px rgba(0,0,0,0.35);
+}
 .small { color:#98a5b8; font-size:13px; }
 .pill { display:inline-block; background:rgba(124,92,255,0.12); color:#a99bff; padding:6px 10px; border-radius:999px; font-weight:600; margin-right:6px; }
 .stat-title { color:#9fb7ff; font-size:12px; margin:0; }
@@ -215,13 +223,12 @@ body { background:#061029; color:#e7eef8; }
 .sample-item { display:flex; gap:10px; margin-bottom:8px; align-items:center; }
 .thumb { width:160px; height:90px; object-fit:cover; border-radius:6px; }
 .meta { display:flex; flex-direction:column; }
-.hist { width:100%; height:140px; }
 a { color:#9fb7ff; text-decoration:none; }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------
-# Sidebar
+# Sidebar controls (added max_channel_age_months)
 # -------------------------
 st.sidebar.title("Controls")
 keywords_input = st.sidebar.text_area("Keywords (one per line)", value="Affair Relationship Stories\nReddit Cheating\nAITA Update", height=140)
@@ -229,6 +236,7 @@ keywords = [k.strip() for k in re.split(r"[\n,]+", keywords_input) if k.strip()]
 days = st.sidebar.number_input("Search last N days", min_value=1, max_value=90, value=7)
 results_per_keyword = st.sidebar.slider("Results per keyword", 1, 50, 8)
 min_channel_subs = st.sidebar.number_input("Min channel subscribers (0 = none)", min_value=0, value=0)
+max_channel_age_months = st.sidebar.number_input("Max channel age (months, 0 = none)", min_value=0, value=0)
 only_shorts = st.sidebar.checkbox("Only Shorts (avg duration < 60s)", value=False)
 country_filter = st.sidebar.text_input("Channel country filter (ISO code or country name, optional)", value="")
 auto_save_csv = st.sidebar.checkbox("Auto-save CSV after run", value=True)
@@ -243,7 +251,7 @@ init_db()
 # Main UI: Run
 # -------------------------
 st.title("ViralScope")
-st.write("Find recent viral videos for keywords. Duration histogram shown per channel card. Video IDs are not stored or shown.")
+st.write("Find recent viral videos. Video IDs are not stored or shown. Use Max channel age to filter channels.")
 
 colL, colR = st.columns([3, 1])
 with colR:
@@ -372,7 +380,6 @@ if st.button("Run Scan"):
                 else:
                     ch_title = snip.get("channelTitle")
 
-                # ensure channel_map entry exists
                 if cid and cid not in channel_map:
                     channel_map[cid] = {"title": ch_title, "subs": None, "published_at": None, "country": None, "avatar": None, "sample_videos": []}
                 row = {
@@ -427,6 +434,15 @@ if st.button("Run Scan"):
                 ch_age_months = max(0, (now.year - ch_published_dt.year) * 12 + (now.month - ch_published_dt.month))
             else:
                 ch_age_months = None
+
+            # max age filter (new)
+            if max_channel_age_months and max_channel_age_months > 0:
+                # if channel age unknown, skip (we don't want unknown-age channels when max is set)
+                if ch_age_months is None:
+                    continue
+                if ch_age_months > max_channel_age_months:
+                    continue
+
             virality_list = [v["virality"] for v in sv]
             highest_virality = max(virality_list) if virality_list else 0
             median_virality = int(sorted(virality_list)[len(virality_list)//2]) if virality_list else 0
@@ -470,7 +486,7 @@ if st.button("Run Scan"):
                     "keyword": sv["keyword"],
                     "title": sv["title"],
                     "channel_id": sv.get("channel_id"),
-                    "channel_title": sv.get("channel_title") or c.get("channel_title"),
+                    "channel_title": sv.get("channel_title") or c.get("channel_title") or c.get("channel_title"),
                     "channel_subs": sv.get("channel_subs") or c.get("subs") or 0,
                     "views": sv["views"],
                     "likes": sv["likes"],
@@ -497,7 +513,7 @@ if st.button("Run Scan"):
                     "monetization_likelihood": row_db["monetization_likelihood"]
                 })
 
-        # auto-save CSV (channel_title only)
+        # auto-save CSV
         csv_file = None
         if auto_save_csv and csv_rows:
             ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -516,7 +532,7 @@ if st.button("Run Scan"):
             save_run_to_db(run_id, now, days, keywords, note, saved_rows_for_db)
             st.success("Run saved to local DB for trends (channel_title stored)")
 
-        # Display cards with duration histogram
+        # Display clean cards (histogram removed)
         st.markdown("### Results")
         if not channel_cards:
             st.info("No channels matched filters.")
@@ -532,24 +548,6 @@ if st.button("Run Scan"):
                     st.markdown(f"<div><span class='pill'>Virality: {c['highest_virality']}</span><span class='pill'>Median: {c['median_virality']}</span><span class='pill'>Monet: {c['monetization_likelihood']}%</span></div>", unsafe_allow_html=True)
                     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
                     st.markdown(f"**Avg duration (sample):** {c['avg_duration_readable']}  \n**Avg views (sample):** {c['avg_views_sample']}", unsafe_allow_html=True)
-                    st.markdown("<div style='margin-top:8px'><b>Duration distribution (sample)</b></div>", unsafe_allow_html=True)
-
-                    # build duration histogram buckets
-                    durations = [v["duration_seconds"] for v in c["sample_videos"] if v.get("duration_seconds") is not None]
-                    # buckets: '<60s', '1-4m', '4-10m', '10m+'
-                    buckets = {"<60s":0, "1-4m":0, "4-10m":0, "10m+":0}
-                    for d in durations:
-                        if d < 60:
-                            buckets["<60s"] += 1
-                        elif d < 240:
-                            buckets["1-4m"] += 1
-                        elif d < 600:
-                            buckets["4-10m"] += 1
-                        else:
-                            buckets["10m+"] += 1
-                    hist_df = pd.DataFrame(list(buckets.items()), columns=["bucket","count"]).set_index("bucket")
-                    st.bar_chart(hist_df)
-
                     st.markdown("<div style='margin-top:8px'><b>Top sample videos</b></div>", unsafe_allow_html=True)
                     for sv in c['sample_videos'][:4]:
                         thumb = sv.get('thumbnail')
@@ -562,7 +560,6 @@ if st.button("Run Scan"):
                             st.markdown(f"<div class='sample-item'><img class='thumb' src='{thumb}' alt='thumb'/> <div class='meta'><a href='{url}' target='_blank'><b>{title}</b></a><div class='small'>Views: {views} • Duration: {dur} • Virality: {vir}</div></div></div>", unsafe_allow_html=True)
                         else:
                             st.markdown(f"<div class='sample-item'><div class='meta'><a href='{url}' target='_blank'><b>{title}</b></a><div class='small'>Views: {views} • Duration: {dur} • Virality: {vir}</div></div></div>", unsafe_allow_html=True)
-
                     st.markdown("</div>", unsafe_allow_html=True)
 
         # optional raw table
