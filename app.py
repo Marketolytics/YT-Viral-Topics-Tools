@@ -1,10 +1,9 @@
 # app.py
 """
-ViralScope — Fixed multiple-results bug + show publish date for each sample video
+ViralScope — Max channel age means "channels created in the last X months"
 - Inline API_KEY present (keep private)
 - Run: streamlit run app.py
 """
-
 import streamlit as st
 import requests
 from datetime import datetime, timedelta
@@ -118,11 +117,12 @@ def monetization_likelihood(subs, avg_views_per_video, channel_age_months):
     return int(max(0, min(100, s)))
 
 # -------------------------
-# DB helpers (no video_id anywhere)
+# DB helpers (no video_id retained/shown)
 # -------------------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
+    # runs
     cur.execute("""
         CREATE TABLE IF NOT EXISTS runs (
             run_id TEXT PRIMARY KEY,
@@ -132,6 +132,7 @@ def init_db():
             notes TEXT
         )
     """)
+    # video_samples: keep channel_id internally, but CSV/exports will show channel_title only
     cur.execute("""
         CREATE TABLE IF NOT EXISTS video_samples (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -218,12 +219,14 @@ body { background:#061029; color:#e7eef8; }
 .sample-item { display:flex; gap:10px; margin-bottom:8px; align-items:center; }
 .thumb { width:160px; height:90px; object-fit:cover; border-radius:6px; }
 .meta { display:flex; flex-direction:column; }
+.stat-title { color:#9fb7ff; font-size:12px; margin:0; }
+.stat-value { font-weight:700; font-size:16px; margin:0; }
 a { color:#9fb7ff; text-decoration:none; }
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------
-# Sidebar controls (includes max_channel_age_months)
+# Sidebar (Max channel age means channels created in last X months)
 # -------------------------
 st.sidebar.title("Controls")
 keywords_input = st.sidebar.text_area("Keywords (one per line)", value="Affair Relationship Stories\nReddit Cheating\nAITA Update", height=140)
@@ -231,26 +234,27 @@ keywords = [k.strip() for k in re.split(r"[\n,]+", keywords_input) if k.strip()]
 days = st.sidebar.number_input("Search last N days", min_value=1, max_value=90, value=7)
 results_per_keyword = st.sidebar.slider("Results per keyword", 1, 50, 8)
 min_channel_subs = st.sidebar.number_input("Min channel subscribers (0 = none)", min_value=0, value=0)
-max_channel_age_months = st.sidebar.number_input("Max channel age (months, 0 = none)", min_value=0, value=0)
+max_channel_age_months = st.sidebar.number_input("Max channel age (months) — channels created in the last X months (0 = none)", min_value=0, value=0)
+include_unknown_channel_age = st.sidebar.checkbox("Include channels with unknown creation date", value=True)
 only_shorts = st.sidebar.checkbox("Only Shorts (avg duration < 60s)", value=False)
 country_filter = st.sidebar.text_input("Channel country filter (ISO code or country name, optional)", value="")
 auto_save_csv = st.sidebar.checkbox("Auto-save CSV after run", value=True)
 save_to_db = st.sidebar.checkbox("Save run to local DB", value=True)
 show_raw = st.sidebar.checkbox("Show raw results table", value=False)
-st.sidebar.markdown("Keep API key in this file private!")
+st.sidebar.markdown("Note: Max channel age = channels created in the last X months (very new channels).")
 
 # Initialize DB
 init_db()
 
 # -------------------------
-# Main - Run
+# Main UI
 # -------------------------
 st.title("ViralScope")
-st.write("Find recent viral videos for keywords. Video IDs are not stored or shown. Publish date added to each sample video.")
+st.write("Search recent viral videos. Max channel age filters channels created in the last X months. Video IDs are not stored or shown.")
 
 colL, colR = st.columns([3, 1])
 with colR:
-    st.markdown("Info")
+    st.markdown("Quick info")
     st.write(f"Keywords: {len(keywords)}")
     st.write(f"Days: {days}")
     st.write(f"Results/keyword: {results_per_keyword}")
@@ -317,7 +321,7 @@ if st.button("Run Scan"):
                 progress.progress(int(i/len(keywords)*100))
                 continue
 
-            # call videos API
+            # videos API call
             v_params = {
                 "part": "snippet,statistics,contentDetails",
                 "id": ",".join(video_ids),
@@ -352,10 +356,9 @@ if st.button("Run Scan"):
                 else:
                     pass
 
-            # PROCESS each video (FIX: extract vid properly and use vid_to_kw[vid])
+            # process video items (use vid_to_kw mapping correctly)
             for vi in vitems:
-                vid = vi.get("id")  # videos.list returns id as videoId string
-                # ensure vid is a string (some responses sometimes have nested structure, but here it should be string)
+                vid = vi.get("id")
                 if isinstance(vid, dict):
                     vid = vid.get("videoId") or vid.get("id")
                 snip = vi.get("snippet", {})
@@ -373,19 +376,14 @@ if st.button("Run Scan"):
                 virality = compute_virality_score(views, publish_dt, now=now)
                 thumbs = snip.get("thumbnails", {})
                 thumbnail = (thumbs.get("medium") or thumbs.get("high") or thumbs.get("default") or {}).get("url")
-
-                # channel title fallback
                 ch_title = None
                 if cid and cid in channel_map and channel_map[cid].get("title"):
                     ch_title = channel_map[cid]["title"]
                 else:
                     ch_title = snip.get("channelTitle")
-
-                # ensure channel_map entry exists
                 if cid and cid not in channel_map:
                     channel_map[cid] = {"title": ch_title, "subs": None, "published_at": None, "country": None, "avatar": None, "sample_videos": []}
 
-                # FIX: use vid_to_kw[vid] — this ensures correct keyword mapping for each video
                 kw_for_vid = vid_to_kw.get(vid, "")
 
                 row = {
@@ -415,7 +413,7 @@ if st.button("Run Scan"):
             progress.progress(int(i/len(keywords)*100))
 
         status.text("Computing channel-level metrics...")
-        # build channel cards
+        # build channel cards with filters (max_channel_age_months means channels created in last X months)
         channel_cards = []
         for cid, cinfo in channel_map.items():
             sv = cinfo.get("sample_videos", [])
@@ -442,12 +440,16 @@ if st.button("Run Scan"):
             else:
                 ch_age_months = None
 
-            # max age filter
+            # NEW: apply Max channel age filter meaning "channels created in the last X months"
             if max_channel_age_months and max_channel_age_months > 0:
+                # if channel age unknown, include only if user allowed it
                 if ch_age_months is None:
-                    continue
-                if ch_age_months > max_channel_age_months:
-                    continue
+                    if not include_unknown_channel_age:
+                        continue
+                else:
+                    # include only if channel age is <= max_channel_age_months
+                    if ch_age_months > max_channel_age_months:
+                        continue
 
             virality_list = [v["virality"] for v in sv]
             highest_virality = max(virality_list) if virality_list else 0
@@ -480,10 +482,10 @@ if st.button("Run Scan"):
                 continue
             channel_cards.append(card)
 
-        # sort channels
+        # sort channels by virality
         channel_cards = sorted(channel_cards, key=lambda x: x["highest_virality"], reverse=True)
 
-        # prepare DB rows and CSV rows (CSV excludes channel_id; includes channel_title and published date)
+        # prepare DB rows and CSV rows (CSV will not include channel_id)
         saved_rows_for_db = []
         csv_rows = []
         for c in channel_cards:
@@ -530,7 +532,7 @@ if st.button("Run Scan"):
                 writer.writeheader()
                 writer.writerows(csv_rows)
             csv_file = fname
-            st.success(f"CSV saved: {csv_file} (channel_name shown)")
+            st.success(f"CSV saved: {csv_file} (channel title shown; channel_id not included)")
 
         # save to DB
         if save_to_db and saved_rows_for_db:
@@ -538,7 +540,7 @@ if st.button("Run Scan"):
             save_run_to_db(run_id, now, days, keywords, note, saved_rows_for_db)
             st.success("Run saved to local DB for trends (channel_title stored)")
 
-        # DISPLAY cards — each sample shows published date (UTC)
+        # Display cards (with publish date for each sample)
         st.markdown("### Results")
         if not channel_cards:
             st.info("No channels matched filters.")
@@ -591,7 +593,7 @@ if st.button("Run Scan"):
         status.empty()
 
 # -------------------------
-# Trends (channel-level)
+# Trends dashboard (channel-level)
 # -------------------------
 st.markdown("---")
 st.markdown("### Trends Dashboard (channel-level)")
@@ -619,4 +621,4 @@ else:
             st.line_chart(agg)
             st.table(agg.tail(20).assign(views=lambda x: x['views'].astype(int), virality=lambda x: x['virality'].round(1)))
 
-st.markdown("Run the crawler periodically to collect trends.")
+st.markdown("Tip: set Max channel age = 3 to see channels created within the last 3 months. If many channels lack creation date, enable 'Include channels with unknown creation date' so they are still shown.")
