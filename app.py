@@ -1,11 +1,10 @@
 # app.py
 """
-ViralScope — Updated:
-- Removed per-card duration histogram
-- Added Max channel age filter (months)
-- Thin white border around each channel card (CSS)
-- Inline API key still present (keep private)
+ViralScope — Fixed multiple-results bug + show publish date for each sample video
+- Inline API_KEY present (keep private)
+- Run: streamlit run app.py
 """
+
 import streamlit as st
 import requests
 from datetime import datetime, timedelta
@@ -27,7 +26,7 @@ YOUTUBE_CHANNEL_URL = "https://www.googleapis.com/youtube/v3/channels"
 DB_FILE = "viral_scope.db"
 
 # -------------------------
-# Utility functions
+# Utilities
 # -------------------------
 def parse_iso8601_duration_to_seconds(duration):
     if not duration or not duration.startswith("PT"):
@@ -119,12 +118,11 @@ def monetization_likelihood(subs, avg_views_per_video, channel_age_months):
     return int(max(0, min(100, s)))
 
 # -------------------------
-# DB helpers (no video_id column)
+# DB helpers (no video_id anywhere)
 # -------------------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cur = conn.cursor()
-    # runs
     cur.execute("""
         CREATE TABLE IF NOT EXISTS runs (
             run_id TEXT PRIMARY KEY,
@@ -134,7 +132,6 @@ def init_db():
             notes TEXT
         )
     """)
-    # video_samples: no video_id stored
     cur.execute("""
         CREATE TABLE IF NOT EXISTS video_samples (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -202,7 +199,7 @@ def load_samples_for_channel(channel_id):
     return df
 
 # -------------------------
-# Styling (thin white border around each card)
+# Styling (thin white border)
 # -------------------------
 st.set_page_config(page_title="ViralScope", layout="wide")
 st.markdown("""
@@ -213,13 +210,11 @@ body { background:#061029; color:#e7eef8; }
   border-radius:10px;
   margin-bottom:12px;
   background:#071228;
-  border: 1px solid rgba(255,255,255,0.12); /* thin white border */
+  border: 1px solid rgba(255,255,255,0.12);
   box-shadow: 0 4px 10px rgba(0,0,0,0.35);
 }
 .small { color:#98a5b8; font-size:13px; }
 .pill { display:inline-block; background:rgba(124,92,255,0.12); color:#a99bff; padding:6px 10px; border-radius:999px; font-weight:600; margin-right:6px; }
-.stat-title { color:#9fb7ff; font-size:12px; margin:0; }
-.stat-value { font-weight:700; font-size:16px; margin:0; }
 .sample-item { display:flex; gap:10px; margin-bottom:8px; align-items:center; }
 .thumb { width:160px; height:90px; object-fit:cover; border-radius:6px; }
 .meta { display:flex; flex-direction:column; }
@@ -228,7 +223,7 @@ a { color:#9fb7ff; text-decoration:none; }
 """, unsafe_allow_html=True)
 
 # -------------------------
-# Sidebar controls (added max_channel_age_months)
+# Sidebar controls (includes max_channel_age_months)
 # -------------------------
 st.sidebar.title("Controls")
 keywords_input = st.sidebar.text_area("Keywords (one per line)", value="Affair Relationship Stories\nReddit Cheating\nAITA Update", height=140)
@@ -248,10 +243,10 @@ st.sidebar.markdown("Keep API key in this file private!")
 init_db()
 
 # -------------------------
-# Main UI: Run
+# Main - Run
 # -------------------------
 st.title("ViralScope")
-st.write("Find recent viral videos. Video IDs are not stored or shown. Use Max channel age to filter channels.")
+st.write("Find recent viral videos for keywords. Video IDs are not stored or shown. Publish date added to each sample video.")
 
 colL, colR = st.columns([3, 1])
 with colR:
@@ -276,7 +271,7 @@ if st.button("Run Scan"):
     status = st.empty()
 
     all_video_rows = []
-    channel_map = {}  # channel_id -> {title, subs, published_at, country, avatar, sample_videos}
+    channel_map = {}  # channel_id -> metadata + sample_videos
 
     try:
         for i, kw in enumerate(keywords, start=1):
@@ -322,7 +317,7 @@ if st.button("Run Scan"):
                 progress.progress(int(i/len(keywords)*100))
                 continue
 
-            # fetch video details
+            # call videos API
             v_params = {
                 "part": "snippet,statistics,contentDetails",
                 "id": ",".join(video_ids),
@@ -335,7 +330,7 @@ if st.button("Run Scan"):
                 continue
             vitems = vresp.json().get("items", [])
 
-            # fetch channel details for new channels
+            # fetch channel metadata for new channels
             new_ch_ids = [cid for cid in set(ch_ids) if cid not in channel_map or channel_map[cid].get("subs") is None]
             if new_ch_ids:
                 ch_params = {"part": "snippet,statistics", "id": ",".join(new_ch_ids), "key": API_KEY}
@@ -357,8 +352,12 @@ if st.button("Run Scan"):
                 else:
                     pass
 
-            # process videos
+            # PROCESS each video (FIX: extract vid properly and use vid_to_kw[vid])
             for vi in vitems:
+                vid = vi.get("id")  # videos.list returns id as videoId string
+                # ensure vid is a string (some responses sometimes have nested structure, but here it should be string)
+                if isinstance(vid, dict):
+                    vid = vid.get("videoId") or vid.get("id")
                 snip = vi.get("snippet", {})
                 cid = snip.get("channelId")
                 title = snip.get("title", "")
@@ -374,20 +373,27 @@ if st.button("Run Scan"):
                 virality = compute_virality_score(views, publish_dt, now=now)
                 thumbs = snip.get("thumbnails", {})
                 thumbnail = (thumbs.get("medium") or thumbs.get("high") or thumbs.get("default") or {}).get("url")
+
+                # channel title fallback
                 ch_title = None
                 if cid and cid in channel_map and channel_map[cid].get("title"):
                     ch_title = channel_map[cid]["title"]
                 else:
                     ch_title = snip.get("channelTitle")
 
+                # ensure channel_map entry exists
                 if cid and cid not in channel_map:
                     channel_map[cid] = {"title": ch_title, "subs": None, "published_at": None, "country": None, "avatar": None, "sample_videos": []}
+
+                # FIX: use vid_to_kw[vid] — this ensures correct keyword mapping for each video
+                kw_for_vid = vid_to_kw.get(vid, "")
+
                 row = {
-                    "keyword": vid_to_kw.get(vi.get("id"), ""),
+                    "keyword": kw_for_vid,
                     "title": title,
                     "description": description,
                     "tags": ",".join(tags),
-                    "url": f"https://www.youtube.com/watch?v={vi.get('id')}",
+                    "url": f"https://www.youtube.com/watch?v={vid}",
                     "views": views,
                     "likes": likes,
                     "comments": comments,
@@ -415,6 +421,7 @@ if st.button("Run Scan"):
             sv = cinfo.get("sample_videos", [])
             if not sv:
                 continue
+
             # country filter
             ch_country = cinfo.get("country")
             if country_filter:
@@ -435,9 +442,8 @@ if st.button("Run Scan"):
             else:
                 ch_age_months = None
 
-            # max age filter (new)
+            # max age filter
             if max_channel_age_months and max_channel_age_months > 0:
-                # if channel age unknown, skip (we don't want unknown-age channels when max is set)
                 if ch_age_months is None:
                     continue
                 if ch_age_months > max_channel_age_months:
@@ -474,10 +480,10 @@ if st.button("Run Scan"):
                 continue
             channel_cards.append(card)
 
-        # sort cards
+        # sort channels
         channel_cards = sorted(channel_cards, key=lambda x: x["highest_virality"], reverse=True)
 
-        # prepare rows for DB and CSV (CSV will not contain channel_id)
+        # prepare DB rows and CSV rows (CSV excludes channel_id; includes channel_title and published date)
         saved_rows_for_db = []
         csv_rows = []
         for c in channel_cards:
@@ -486,7 +492,7 @@ if st.button("Run Scan"):
                     "keyword": sv["keyword"],
                     "title": sv["title"],
                     "channel_id": sv.get("channel_id"),
-                    "channel_title": sv.get("channel_title") or c.get("channel_title") or c.get("channel_title"),
+                    "channel_title": sv.get("channel_title") or c.get("channel_title"),
                     "channel_subs": sv.get("channel_subs") or c.get("subs") or 0,
                     "views": sv["views"],
                     "likes": sv["likes"],
@@ -524,7 +530,7 @@ if st.button("Run Scan"):
                 writer.writeheader()
                 writer.writerows(csv_rows)
             csv_file = fname
-            st.success(f"CSV saved: {csv_file} (channel name shown)")
+            st.success(f"CSV saved: {csv_file} (channel_name shown)")
 
         # save to DB
         if save_to_db and saved_rows_for_db:
@@ -532,7 +538,7 @@ if st.button("Run Scan"):
             save_run_to_db(run_id, now, days, keywords, note, saved_rows_for_db)
             st.success("Run saved to local DB for trends (channel_title stored)")
 
-        # Display clean cards (histogram removed)
+        # DISPLAY cards — each sample shows published date (UTC)
         st.markdown("### Results")
         if not channel_cards:
             st.info("No channels matched filters.")
@@ -549,17 +555,24 @@ if st.button("Run Scan"):
                     st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
                     st.markdown(f"**Avg duration (sample):** {c['avg_duration_readable']}  \n**Avg views (sample):** {c['avg_views_sample']}", unsafe_allow_html=True)
                     st.markdown("<div style='margin-top:8px'><b>Top sample videos</b></div>", unsafe_allow_html=True)
-                    for sv in c['sample_videos'][:4]:
+                    for sv in c['sample_videos'][:6]:
                         thumb = sv.get('thumbnail')
                         title = sv.get('title')
                         url = sv.get('url')
                         views = sv.get('views')
                         dur = sv.get('duration_readable', 'N/A')
                         vir = sv.get('virality', 0)
+                        pub = sv.get('published_at')
+                        pub_read = pub if pub else "N/A"
                         if thumb:
-                            st.markdown(f"<div class='sample-item'><img class='thumb' src='{thumb}' alt='thumb'/> <div class='meta'><a href='{url}' target='_blank'><b>{title}</b></a><div class='small'>Views: {views} • Duration: {dur} • Virality: {vir}</div></div></div>", unsafe_allow_html=True)
+                            st.markdown(
+                                f"<div class='sample-item'><img class='thumb' src='{thumb}' alt='thumb'/>"
+                                f" <div class='meta'><a href='{url}' target='_blank'><b>{title}</b></a>"
+                                f"<div class='small'>Published(UTC): {pub_read} • Views: {views} • Duration: {dur} • Virality: {vir}</div></div></div>",
+                                unsafe_allow_html=True)
                         else:
-                            st.markdown(f"<div class='sample-item'><div class='meta'><a href='{url}' target='_blank'><b>{title}</b></a><div class='small'>Views: {views} • Duration: {dur} • Virality: {vir}</div></div></div>", unsafe_allow_html=True)
+                            st.markdown(f"{title} — Published(UTC): {pub_read} • Views: {views} • Duration: {dur} • Virality: {vir}")
+
                     st.markdown("</div>", unsafe_allow_html=True)
 
         # optional raw table
@@ -578,7 +591,7 @@ if st.button("Run Scan"):
         status.empty()
 
 # -------------------------
-# Trends dashboard (channel-level only)
+# Trends (channel-level)
 # -------------------------
 st.markdown("---")
 st.markdown("### Trends Dashboard (channel-level)")
